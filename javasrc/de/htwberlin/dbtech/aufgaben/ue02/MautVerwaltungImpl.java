@@ -1,6 +1,9 @@
 package de.htwberlin.dbtech.aufgaben.ue02;
 
 import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,8 +33,27 @@ public class MautVerwaltungImpl implements IMautVerwaltung {
 
 	@Override
 	public String getStatusForOnBoardUnit(long fzg_id) {
-		// TODO Auto-generated method stub
-		return null;
+
+		PreparedStatement ps = null;
+		ResultSet rs = null;
+		String query = "SELECT status FROM Fahrzeuggerat f WHERE f.FZG_ID = ?";
+		String result = "";
+
+		try {
+			ps = getConnection().prepareStatement(query);
+			ps.setLong(1, fzg_id);
+			rs = ps.executeQuery();
+
+			if(rs.next()) {
+
+				result = rs.getString("status");
+			}
+		} catch (SQLException e) {
+			throw new RuntimeException(e);
+		} catch (NullPointerException e) {
+			throw new RuntimeException(e);
+		}
+		return result;
 	}
 
 	@Override
