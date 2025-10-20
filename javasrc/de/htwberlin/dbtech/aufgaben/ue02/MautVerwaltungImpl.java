@@ -58,9 +58,23 @@ public class MautVerwaltungImpl implements IMautVerwaltung {
 
 	@Override
 	public int getUsernumber(int maut_id) {
-		// TODO Auto-generated method stub
-		return 0;
+		int result = 0;
+		final String sql =
+				"SELECT f.NUTZER_ID FROM MAUTERHEBUNG m JOIN FAHRZEUGGERAT g ON m.FZG_ID = g.FZG_ID JOIN FAHRZEUG f ON g.FZ_ID = f.FZ_ID WHERE m.MAUT_ID = ?";
+
+		try (PreparedStatement ps = getConnection().prepareStatement(sql)) {
+			ps.setInt(1, maut_id);
+			try (ResultSet rs = ps.executeQuery()) {
+				if (rs.next()) {
+					result = rs.getInt("NUTZER_ID");
+				}
+			}
+		} catch (SQLException e) {
+			throw new RuntimeException(e);
+		}
+		return result;
 	}
+
 
 	@Override
 	public void registerVehicle(long fz_id, int sskl_id, int nutzer_id, String kennzeichen, String fin, int achsen,
