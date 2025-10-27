@@ -91,7 +91,22 @@ public class MautVerwaltungImpl implements IMautVerwaltung {
 
 	@Override
 	public void deleteVehicle(long fz_id) {
-		// TODO Auto-generated method stub
+		String sql = "DELETE FROM FAHRZEUG WHERE FZ_ID = ?";
+
+		try (var preparedStatement = getConnection().prepareStatement(sql)) {
+			preparedStatement.setLong(1, fz_id);
+			int rowsAffected = preparedStatement.executeUpdate();
+
+			if (rowsAffected == 0) {
+				L.warn("Kein Fahrzeug mit FZ_ID = {} gefunden.", fz_id);
+			} else {
+				L.info("Fahrzeug mit FZ_ID = {} erfolgreich gelöscht.", fz_id);
+			}
+
+		} catch (SQLException e) {
+			L.error("Fehler beim Löschen des Fahrzeugs mit FZ_ID = {}", fz_id, e);
+			throw new DataException("Fehler beim Löschen des Fahrzeugs: " + e.getMessage(), e);
+		}
 
 	}
 
