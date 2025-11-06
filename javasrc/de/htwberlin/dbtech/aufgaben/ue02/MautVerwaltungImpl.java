@@ -79,9 +79,38 @@ public class MautVerwaltungImpl implements IMautVerwaltung {
 	@Override
 	public void registerVehicle(long fz_id, int sskl_id, int nutzer_id, String kennzeichen, String fin, int achsen,
 			int gewicht, String zulassungsland) {
-		// TODO Auto-generated method stub
+		final String sql = "INSERT INTO FAHRZEUG (FZ_ID, SSKL_ID, NUTZER_ID, KENNZEICHEN, FIN, ACHSEN, GEWICHT, ZULASSUNGSLAND, ANMELDEDATUM) "
+				+ "VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_DATE)";
 
+		final String insertDevice = "INSERT INTO FAHRZEUGGERAT (FZG_ID, FZ_ID, STATUS, EINBAUDATUM) " +
+		"VALUES ((SELECT COALESCE(MAX(FZG_ID),0)+1 FROM FAHRZEUGGERAT), ?, 'aktiv', CURRENT_DATE)";
+
+		try (PreparedStatement ps1 = getConnection().prepareStatement(sql);
+			 PreparedStatement ps2 = getConnection().prepareStatement(insertDevice)) {
+			ps1.setLong(1, fz_id);
+			ps1.setInt(2, sskl_id);
+			ps1.setInt(3, nutzer_id);
+			ps1.setString(4, kennzeichen);
+			ps1.setString(5, fin);
+			ps1.setInt(6, achsen);
+			ps1.setInt(7, gewicht);
+			ps1.setString(8, zulassungsland);
+
+			int rows = ps1.executeUpdate();
+			if (rows == 0) {
+				throw new DataException("Kein Datensatz eingefügt für FZ_ID=" + fz_id);
+			}
+
+			ps2.setLong(1, fz_id);
+			ps2.executeUpdate();
+
+			L.info("Fahrzeug {} erfolgreich registriert.", fz_id);
+		} catch (SQLException e) {
+			L.error("Fehler beim Registrieren des Fahrzeugs mit FZ_ID={}", fz_id, e);
+			throw new DataException("Fehler beim Registrieren des Fahrzeugs: " + e.getMessage(), e);
+		}
 	}
+
 
 	@Override
 	public void updateStatusForOnBoardUnit(long fzg_id, String status) {
