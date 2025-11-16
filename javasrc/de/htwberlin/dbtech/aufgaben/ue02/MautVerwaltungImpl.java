@@ -4,6 +4,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -114,8 +115,23 @@ public class MautVerwaltungImpl implements IMautVerwaltung {
 
 	@Override
 	public void updateStatusForOnBoardUnit(long fzg_id, String status) {
-		// TODO Auto-generated method stub
 
+		String sql = "UPDATE FAHRZEUGGERAT SET STATUS = ? WHERE FZG_ID = ?";
+
+		try (PreparedStatement ps = getConnection().prepareStatement(sql)) {
+
+			ps.setString(1, status);
+			ps.setLong(2, fzg_id);
+
+			int affected = ps.executeUpdate();
+			if (affected == 0) {
+				L.warn("Kein Gerät mit FZG_ID {} gefunden.", fzg_id);
+			}
+
+		} catch (SQLException e) {
+			L.error("Fehler beim Aktualisieren des Status für FZG_ID {}", fzg_id, e);
+			throw new DataException("Fehler beim Aktualisieren des Status: " + e.getMessage(), e);
+		}
 	}
 
 	@Override
@@ -141,8 +157,38 @@ public class MautVerwaltungImpl implements IMautVerwaltung {
 
 	@Override
 	public List<Mautabschnitt> getTrackInformations(String abschnittstyp) {
-		// TODO Auto-generated method stub
-		return null;
+		String sql = """
+        SELECT ABSCHNITTS_ID, LAENGE, START_KOORDINATE, ZIEL_KOORDINATE, NAME, ABSCHNITTSTYP
+        FROM MAUTABSCHNITT
+        WHERE ABSCHNITTSTYP = ?
+        ORDER BY ABSCHNITTS_ID
+        """;
+
+		List<Mautabschnitt> result = new ArrayList<>();
+
+		try (PreparedStatement ps = getConnection().prepareStatement(sql)) {
+			ps.setString(1, abschnittstyp);
+
+			try (ResultSet rs = ps.executeQuery()) {
+				while (rs.next()) {
+					Mautabschnitt abschnitt = new Mautabschnitt(
+							rs.getInt("ABSCHNITTS_ID"),
+							rs.getInt("LAENGE"),
+							rs.getString("START_KOORDINATE"),
+							rs.getString("ZIEL_KOORDINATE"),
+							rs.getString("NAME"),
+							rs.getString("ABSCHNITTSTYP")
+					);
+					result.add(abschnitt);
+				}
+			}
+		} catch (SQLException e) {
+			L.error("Fehler beim Abfragen der Mautabschnitte für Typ = {}", abschnittstyp, e);
+			throw new DataException("Fehler beim Abfragen der Mautabschnitte: " + e.getMessage(), e);
+		}
+
+		return result;
 	}
+
 
 }
