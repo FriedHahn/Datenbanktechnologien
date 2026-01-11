@@ -1,23 +1,21 @@
 package de.htwberlin.dbtech.aufgaben.ue03;
 
-import java.sql.Connection;
-import java.sql.Date;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.sql.*;
+import java.time.LocalDate;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import de.htwberlin.dbtech.exceptions.AlreadyCruisedException;
 import de.htwberlin.dbtech.exceptions.DataException;
+import de.htwberlin.dbtech.exceptions.AlreadyCruisedException;
 import de.htwberlin.dbtech.exceptions.InvalidVehicleDataException;
 import de.htwberlin.dbtech.exceptions.UnkownVehicleException;
 
 /**
- * Die Klasse realisiert den Mautservice.
+ * Die Klasse realisiert den AusleiheService.
  *
- * @author Patrick Vollert
+ * @author Patrick Dohmeier
  */
 public class MautServiceImpl implements IMautService {
 
@@ -25,8 +23,7 @@ public class MautServiceImpl implements IMautService {
 	private Connection connection;
 
 	@Override
-	public void setConnection(Connection connection) {
-		this.connection = connection;
+	public void setConnection(Connection connection) {this.connection = connection;
 	}
 
 	private Connection getConnection() {
@@ -40,363 +37,257 @@ public class MautServiceImpl implements IMautService {
 	public void berechneMaut(int mautAbschnitt, int achszahl, String kennzeichen)
 			throws UnkownVehicleException, InvalidVehicleDataException, AlreadyCruisedException {
 
-		if (!isVehicleRegistered(kennzeichen)) {
-			throw new UnkownVehicleException("Das Fahrzeug ist nicht bekannt!-> Mautpreller");
+		boolean istAutomatisch = istAutoRegistriert(kennzeichen);
+		boolean istManuell = istManuellRegistriert(mautAbschnitt, kennzeichen);
+
+		if (!istAutomatisch && !istManuell) {
+			throw new UnkownVehicleException("Fahrzeug nicht registriert");
 		}
 
-		Connection con = getConnection();
+		boolean istAchszahlRichtig = istAchszahlRichtig(mautAbschnitt, achszahl, kennzeichen,
+				istAutomatisch, istManuell);
+		boolean istBuchungAbgeschlossen = istBuchungAbgeschlossen(mautAbschnitt, kennzeichen);
 
-		try {
-			Vehicle vehicle = loadVehicle(con, kennzeichen);
+		if (!istAchszahlRichtig) {
+			throw new InvalidVehicleDataException("Fahrzeugdaten (Achszahl) sind nicht korrekt");
+		}
 
-			BookingInfos bookings = loadBookings(con, kennzeichen, mautAbschnitt);
-
-			boolean hasVehicle = vehicle != null;
-			boolean hasAnyBooking = bookings.anyBooking != null;
-			boolean hasOpenBooking = bookings.openBooking != null;
-			boolean hasActiveDevice = hasVehicle && vehicle.hasActiveDevice;
-
-			if (!hasActiveDevice && !hasAnyBooking) {
-				throw new UnkownVehicleException(
-						"Fahrzeug ist weder im automatischen Verfahren aktiv noch liegt eine Buchung vor");
+		if (istManuell) {
+			if (istBuchungAbgeschlossen) {
+				throw new AlreadyCruisedException("Strecke wurde bereits befahren");
 			}
+			buchungsStatusAbgeschlossen(kennzeichen, mautAbschnitt);
+		}
 
-			if (hasActiveDevice) {
-
-				if (achszahl > vehicle.achsen) {
-					throw new InvalidVehicleDataException(
-							"Im automatischen Verfahren ist die angegebene Achszahl groesser als registriert");
-				}
-
-				double kosten = calculateToll(con, mautAbschnitt, achszahl, vehicle.ssklId);
-				insertMauterhebung(con, mautAbschnitt, vehicle.activeDeviceId, vehicle.ssklId, achszahl, kosten);
-
-			} else {
-
-				if (!hasAnyBooking) {
-					throw new UnkownVehicleException("Keine Buchung fuer das Fahrzeug vorhanden");
-				}
-
-				if (!hasOpenBooking) {
-					throw new AlreadyCruisedException(
-							"Der Streckenabschnitt wurde mit dieser Buchung bereits befahren");
-				}
-
-				Booking booking = bookings.openBooking;
-
-				int bookedAxles = getAchszahlForKategorie(con, booking.kategorieId);
-
-				if (achszahl != bookedAxles) {
-					throw new InvalidVehicleDataException(
-							"Die gebuchte Mautkategorie passt nicht zur angegebenen Achszahl");
-				}
-
-				closeBooking(con, booking.buchungId);
-			}
-
-		} catch (SQLException e) {
-			L.error("SQL-Fehler bei der Mauterhebung", e);
-			throw new DataException("Fehler bei der Mauterhebung", e);
+		if (istAutomatisch) {
+			autoMautberechnung(achszahl, kennzeichen, mautAbschnitt);
 		}
 	}
 
-	/**
-	 * prüft, ob das Fahrzeug bereits registriert und aktiv ist oder eine
-	 * manuelle offene Buchung für das Fahrzeug vorliegt.
-	 *
-	 * @param kennzeichen das Kennzeichen des Fahrzeugs
-	 * @return true wenn das Fahrzeug registiert ist, false wenn nicht
-	 **/
-	public boolean isVehicleRegistered(String kennzeichen) {
-		PreparedStatement preparedStatement = null;
-		ResultSet resultSet = null;
+	private boolean istManuellRegistriert(int mautAbschnitt, String kennzeichen) {
+		try (PreparedStatement s = connection.prepareStatement(
+				"SELECT * FROM BUCHUNG b WHERE KENNZEICHEN = ? AND ABSCHNITTS_ID = ?")) {
 
-		try {
-			String queryString =
-					"SELECT SUM( ANZAHL ) AS ANZAHL FROM (" +
-							"  SELECT COUNT(F.KENNZEICHEN) AS ANZAHL " +
-							"  FROM FAHRZEUG F " +
-							"  JOIN FAHRZEUGGERAT FZG ON F.FZ_ID = FZG.FZ_ID " +
-							"  AND F.ABMELDEDATUM IS NULL " +
-							"  AND FZG.STATUS = 'active' " +
-							"  AND F.KENNZEICHEN = ? " +
-							"  UNION ALL " +
-							"  SELECT COUNT(KENNZEICHEN) AS ANZAHL " +
-							"  FROM BUCHUNG " +
-							"  WHERE KENNZEICHEN = ? AND B_ID = 1" +
-							")";
+			s.setString(1, kennzeichen);
+			s.setInt(2, mautAbschnitt);
+			ResultSet r = s.executeQuery();
+			return r.next();
+		} catch (SQLException e) {
+			throw new DataException(e);
+		}
+	}
 
-			preparedStatement = getConnection().prepareStatement(queryString);
-			preparedStatement.setString(1, kennzeichen);
-			preparedStatement.setString(2, kennzeichen);
-			resultSet = preparedStatement.executeQuery();
-			if (resultSet.next()) {
-				return resultSet.getLong("ANZAHL") > 0;
-			} else {
+	private boolean istAutoRegistriert(String kennzeichen) {
+		try (PreparedStatement s = connection.prepareStatement(
+				"SELECT * FROM FAHRZEUG WHERE KENNZEICHEN = ? AND ABMELDEDATUM IS NULL")) {
+
+			s.setString(1, kennzeichen);
+			ResultSet r = s.executeQuery();
+			return r.next();
+		} catch (SQLException e) {
+			throw new DataException(e);
+		}
+	}
+
+	private boolean istAchszahlRichtig(int mautAbschnitt, int achszahl, String kennzeichen,
+									   boolean istAutomatisch, boolean istManuell) {
+
+		if (istAutomatisch) {
+			try (PreparedStatement s = connection.prepareStatement(
+					"SELECT 1 FROM FAHRZEUG " +
+							"WHERE KENNZEICHEN = ? AND ACHSEN = ? AND ABMELDEDATUM IS NULL")) {
+
+				s.setString(1, kennzeichen);
+				s.setInt(2, achszahl);
+				return s.executeQuery().next();
+
+			} catch (SQLException e) {
+				throw new DataException(e);
+			}
+		}
+
+		if (istManuell) {
+			try (PreparedStatement s = connection.prepareStatement(
+					"SELECT MK.ACHSZAHL " +
+							"FROM BUCHUNG B " +
+							"JOIN MAUTKATEGORIE MK ON B.KATEGORIE_ID = MK.KATEGORIE_ID " +
+							"WHERE B.ABSCHNITTS_ID = ? AND B.KENNZEICHEN = ?")) {
+
+				s.setInt(1, mautAbschnitt);
+				s.setString(2, kennzeichen);
+				ResultSet r = s.executeQuery();
+
+				if (r.next()) {
+					String regel = r.getString("ACHSZAHL");
+					return passtZurAchszahl(regel, achszahl);
+				}
 				return false;
+
+			} catch (SQLException e) {
+				throw new DataException(e);
+			}
+		}
+		return false;
+	}
+
+	private boolean istBuchungAbgeschlossen(int mautAbschnitt, String kennzeichen) {
+		try (PreparedStatement s = connection.prepareStatement(
+				"SELECT B_ID FROM BUCHUNG WHERE ABSCHNITTS_ID = ? AND KENNZEICHEN = ?")) {
+
+			s.setInt(1, mautAbschnitt);
+			s.setString(2, kennzeichen);
+			ResultSet r = s.executeQuery();
+
+			if (r.next()) {
+				int status = r.getInt("B_ID");
+				return status == 3;
+			}
+			return false;
+
+		} catch (SQLException e) {
+			throw new DataException(e);
+		}
+	}
+
+	private void buchungsStatusAbgeschlossen(String kennzeichen, int mautAbschnitt){
+		try (PreparedStatement s = connection.prepareStatement("Update buchung set b_id = 3, befahrungsdatum = ? where abschnitts_id = ? AND kennzeichen = ?")) {
+			s.setDate(1, Date.valueOf(LocalDate.now()));
+			s.setInt(2, mautAbschnitt);
+			s.setString(3, kennzeichen);
+
+			s.executeUpdate();
+
+		} catch (SQLException e) {
+			throw new DataException(e);
+		}
+	}
+
+	private void autoMautberechnung(int achszahl, String kennzeichen, int mautAbschnitt) {
+		long laengeMeter = 0L;
+		int SSKL_ID = 0;
+		BigDecimal preis = BigDecimal.ZERO;
+		int kategorie = 0;
+		long fzg = 0;
+		int maut = 0;
+
+		try (PreparedStatement s = connection.prepareStatement(
+				"SELECT LAENGE FROM MAUTABSCHNITT WHERE ABSCHNITTS_ID = ?")) {
+
+			s.setInt(1, mautAbschnitt);
+			ResultSet r = s.executeQuery();
+			if (r.next()) {
+				laengeMeter = r.getLong("LAENGE");
 			}
 		} catch (SQLException e) {
-			e.printStackTrace();
+			throw new RuntimeException(e);
+		}
+
+		try (PreparedStatement s = connection.prepareStatement(
+				"SELECT SSKL_ID FROM FAHRZEUG WHERE ACHSEN = ? AND KENNZEICHEN = ?")) {
+
+			s.setInt(1, achszahl);
+			s.setString(2, kennzeichen);
+			ResultSet r = s.executeQuery();
+			if (r.next()) {
+				SSKL_ID = r.getInt("SSKL_ID");
+			}
+		} catch (SQLException e) {
+			throw new RuntimeException(e);
+		}
+
+		try (PreparedStatement s = connection.prepareStatement(
+				"SELECT KATEGORIE_ID, ACHSZAHL, MAUTSATZ_JE_KM " +
+						"FROM MAUTKATEGORIE WHERE SSKL_ID = ?")) {
+
+			s.setInt(1, SSKL_ID);
+			ResultSet r = s.executeQuery();
+
+			while (r.next()) {
+				String regel = r.getString("ACHSZAHL");
+
+				if (passtZurAchszahl(regel, achszahl)) {
+					BigDecimal mautsatzJeKm = r.getBigDecimal("MAUTSATZ_JE_KM");
+					kategorie = r.getInt("KATEGORIE_ID");
+
+					BigDecimal lengthKm = BigDecimal.valueOf(laengeMeter)
+							.divide(BigDecimal.valueOf(1000), 3, RoundingMode.HALF_UP);
+
+					preis = mautsatzJeKm
+							.divide(BigDecimal.valueOf(100), 4, RoundingMode.HALF_UP)
+							.multiply(lengthKm);
+
+					preis = preis.setScale(2, RoundingMode.HALF_UP);
+
+					break;
+				}
+			}
+		} catch (SQLException e) {
+			throw new RuntimeException(e);
+		}
+
+		try (PreparedStatement s = connection.prepareStatement(
+				"SELECT fg.FZG_ID " +
+						"FROM FAHRZEUGGERAT fg " +
+						"JOIN FAHRZEUG f ON fg.FZ_ID = f.FZ_ID " +
+						"WHERE f.SSKL_ID = ? " +
+						"  AND f.KENNZEICHEN = ? " +
+						"  AND f.ACHSEN = ?")) {
+
+			s.setInt(1, SSKL_ID);
+			s.setString(2, kennzeichen);
+			s.setInt(3, achszahl);
+			ResultSet r = s.executeQuery();
+			if (r.next()) {
+				fzg = r.getLong("FZG_ID");
+			}
+		} catch (SQLException e) {
+			throw new RuntimeException(e);
+		}
+
+		try (PreparedStatement s = connection.prepareStatement(
+				"SELECT COALESCE(MAX(MAUT_ID), 0) AS MAX_ID FROM MAUTERHEBUNG")) {
+
+			ResultSet r = s.executeQuery();
+			if (r.next()) {
+				maut = (int) (r.getLong("MAX_ID") + 1);
+			} else {
+				maut = 1;
+			}
+		} catch (SQLException e) {
+			throw new RuntimeException(e);
+		}
+
+		try (PreparedStatement s = connection.prepareStatement(
+				"INSERT INTO MAUTERHEBUNG " +
+						"(MAUT_ID, ABSCHNITTS_ID, FZG_ID, KATEGORIE_ID, BEFAHRUNGSDATUM, KOSTEN) " +
+						"VALUES (?, ?, ?, ?, ?, ?)")) {
+
+			s.setInt(1, maut);
+			s.setInt(2, mautAbschnitt);
+			s.setLong(3, fzg);
+			s.setInt(4, kategorie);
+			s.setDate(5, Date.valueOf(LocalDate.now()));
+			s.setBigDecimal(6, preis);
+
+			s.executeUpdate();
+		} catch (SQLException e) {
 			throw new RuntimeException(e);
 		}
 	}
 
-	/**
-	 * Fahrzeug und aktives Fahrzeuggeraet laden.
-	 *
-	 * Tabellen: FAHRZEUG, FAHRZEUGGERAT
-	 */
-	private Vehicle loadVehicle(Connection con, String kennzeichen) throws SQLException {
-		String sql =
-				"SELECT f.FZ_ID, f.SSKL_ID, f.ACHSEN, g.FZG_ID, g.STATUS " +
-						"FROM FAHRZEUG f " +
-						"LEFT JOIN FAHRZEUGGERAT g ON f.FZ_ID = g.FZ_ID " +
-						"WHERE f.KENNZEICHEN = ?";
+	private boolean passtZurAchszahl(String regel, int achsen) {
+		regel = regel.trim();
 
-		try (PreparedStatement ps = con.prepareStatement(sql)) {
-			ps.setString(1, kennzeichen);
-			try (ResultSet rs = ps.executeQuery()) {
-				if (!rs.next()) {
-					return null;
-				}
-				int fzId = rs.getInt("FZ_ID");
-				int ssklId = rs.getInt("SSKL_ID");
-				int achsen = rs.getInt("ACHSEN");
-
-				Integer fzgId = (Integer) rs.getObject("FZG_ID");
-				String status = rs.getString("STATUS");
-
-				boolean hasActiveDevice = false;
-				int activeDeviceId = 0;
-
-				if (fzgId != null) {
-					hasActiveDevice = status != null && status.equalsIgnoreCase("active");
-					if (hasActiveDevice) {
-						activeDeviceId = fzgId;
-					}
-				}
-
-				return new Vehicle(fzId, ssklId, achsen, hasActiveDevice, activeDeviceId);
-			}
+		if (regel.startsWith("=")) {
+			int val = Integer.parseInt(regel.substring(1).trim());
+			return achsen == val;
 		}
-	}
 
-	/**
-	 * Alle Buchungen zu Kennzeichen und Abschnitt laden (ohne Join auf BUCHUNGSSTATUS).
-	 * B_ID = 1 wird als "offen" interpretiert (siehe isVehicleRegistered).
-	 */
-	private BookingInfos loadBookings(Connection con, String kennzeichen, int abschnittId) throws SQLException {
-		String sql =
-				"SELECT BUCHUNG_ID, KATEGORIE_ID, B_ID " +
-						"FROM BUCHUNG " +
-						"WHERE KENNZEICHEN = ? AND ABSCHNITTS_ID = ?";
-
-		Booking any = null;
-		Booking open = null;
-
-		try (PreparedStatement ps = con.prepareStatement(sql)) {
-			ps.setString(1, kennzeichen);
-			ps.setInt(2, abschnittId);
-
-			try (ResultSet rs = ps.executeQuery()) {
-				while (rs.next()) {
-					int buchungId = rs.getInt("BUCHUNG_ID");
-					int kategorieId = rs.getInt("KATEGORIE_ID");
-					int statusId = rs.getInt("B_ID");
-
-					Booking b = new Booking(buchungId, kategorieId, statusId);
-
-					if (any == null) {
-						any = b;
-					}
-					if (statusId == 1) {
-						open = b;
-					}
-				}
-			}
+		if (regel.startsWith(">=")) {
+			int val = Integer.parseInt(regel.substring(2).trim());
+			return achsen >= val;
 		}
-		return new BookingInfos(any, open);
-	}
 
-	/**
-	 * Achszahl zu einer Kategorie.
-	 *
-	 * Tabelle: MAUTKATEGORIE
-	 */
-	private int getAchszahlForKategorie(Connection con, int kategorieId) throws SQLException {
-		String sql = "SELECT ACHSZAHL FROM MAUTKATEGORIE WHERE KATEGORIE_ID = ?";
-
-		try (PreparedStatement ps = con.prepareStatement(sql)) {
-			ps.setInt(1, kategorieId);
-			try (ResultSet rs = ps.executeQuery()) {
-				if (!rs.next()) {
-					throw new DataException("Keine Mautkategorie mit ID " + kategorieId + " gefunden");
-				}
-				return rs.getInt("ACHSZAHL");
-			}
-		}
-	}
-
-	/**
-	 * Kosten für automatisches Verfahren berechnen.
-	 *
-	 * Tabellen: MAUTABSCHNITT, MAUTKATEGORIE
-	 * Formel: KOSTEN = LAENGE * MAUTSATZ_JE_KM
-	 */
-	private double calculateToll(Connection con, int abschnittId, int achszahl, int ssklId) throws SQLException {
-		String sql =
-				"SELECT a.LAENGE, k.MAUTSATZ_JE_KM " +
-						"FROM MAUTABSCHNITT a, MAUTKATEGORIE k " +
-						"WHERE a.ABSCHNITTS_ID = ? " +
-						"AND k.SSKL_ID = ? " +
-						"AND k.ACHSZAHL = ?";
-
-		try (PreparedStatement ps = con.prepareStatement(sql)) {
-			ps.setInt(1, abschnittId);
-			ps.setInt(2, ssklId);
-			ps.setInt(3, achszahl);
-
-			try (ResultSet rs = ps.executeQuery()) {
-				if (!rs.next()) {
-					throw new DataException("Kein Tarif fuer Abschnitt " + abschnittId +
-							" und Achszahl " + achszahl + " gefunden");
-				}
-				double laenge = rs.getDouble("LAENGE");
-				double mautsatz = rs.getDouble("MAUTSATZ_JE_KM");
-				return laenge * mautsatz;
-			}
-		}
-	}
-
-	/**
-	 * Neue Mauterhebung schreiben.
-	 *
-	 * Tabelle: MAUTERHEBUNG
-	 */
-	private void insertMauterhebung(Connection con, int abschnittId, int fzgId,
-									int ssklId, int achszahl, double kosten) throws SQLException {
-
-		int kategorieId = getKategorieId(con, ssklId, achszahl);
-		int mautId = nextMautId(con);
-
-		String sql =
-				"INSERT INTO MAUTERHEBUNG (MAUT_ID, ABSCHNITTS_ID, FZG_ID, KATEGORIE_ID, BEFAHRUNGSDATUM, KOSTEN) " +
-						"VALUES (?, ?, ?, ?, ?, ?)";
-
-		try (PreparedStatement ps = con.prepareStatement(sql)) {
-			ps.setInt(1, mautId);
-			ps.setInt(2, abschnittId);
-			ps.setInt(3, fzgId);
-			ps.setInt(4, kategorieId);
-			ps.setDate(5, new Date(System.currentTimeMillis()));
-			ps.setDouble(6, kosten);
-			ps.executeUpdate();
-		}
-	}
-
-	/**
-	 * Kategorie zur Kombination aus Schadstoffklasse und Achszahl.
-	 */
-	private int getKategorieId(Connection con, int ssklId, int achszahl) throws SQLException {
-		String sql =
-				"SELECT KATEGORIE_ID " +
-						"FROM MAUTKATEGORIE " +
-						"WHERE SSKL_ID = ? AND ACHSZAHL = ?";
-
-		try (PreparedStatement ps = con.prepareStatement(sql)) {
-			ps.setInt(1, ssklId);
-			ps.setInt(2, achszahl);
-			try (ResultSet rs = ps.executeQuery()) {
-				if (!rs.next()) {
-					throw new DataException("Keine passende Kategorie gefunden");
-				}
-				return rs.getInt("KATEGORIE_ID");
-			}
-		}
-	}
-
-	/**
-	 * nächste freie MAUT_ID bestimmen.
-	 */
-	private int nextMautId(Connection con) throws SQLException {
-		String sql = "SELECT MAX(MAUT_ID) AS MAX_ID FROM MAUTERHEBUNG";
-
-		try (PreparedStatement ps = con.prepareStatement(sql);
-			 ResultSet rs = ps.executeQuery()) {
-			if (rs.next()) {
-				int max = rs.getInt("MAX_ID");
-				return max + 1;
-			}
-			return 1;
-		}
-	}
-
-	/**
-	 * offene Buchung auf "abgeschlossen" setzen.
-	 *
-	 * BUCHUNG.B_ID auf den Status "abgeschlossen" aus BUCHUNGSSTATUS setzen.
-	 */
-	private void closeBooking(Connection con, int buchungId) throws SQLException {
-		int closedStatusId = getClosedStatusId(con);
-
-		String sql = "UPDATE BUCHUNG SET B_ID = ? WHERE BUCHUNG_ID = ?";
-
-		try (PreparedStatement ps = con.prepareStatement(sql)) {
-			ps.setInt(1, closedStatusId);
-			ps.setInt(2, buchungId);
-			ps.executeUpdate();
-		}
-	}
-
-	private int getClosedStatusId(Connection con) throws SQLException {
-		String sql = "SELECT B_ID FROM BUCHUNGSSTATUS WHERE STATUS = 'abgeschlossen'";
-
-		try (PreparedStatement ps = con.prepareStatement(sql);
-			 ResultSet rs = ps.executeQuery()) {
-			if (!rs.next()) {
-				throw new DataException("Kein Status 'abgeschlossen' gefunden");
-			}
-			return rs.getInt("B_ID");
-		}
-	}
-
-
-	private static class Vehicle {
-		final int fzId;
-		final int ssklId;
-		final int achsen;
-		final boolean hasActiveDevice;
-		final int activeDeviceId;
-
-		Vehicle(int fzId, int ssklId, int achsen,
-				boolean hasActiveDevice, int activeDeviceId) {
-			this.fzId = fzId;
-			this.ssklId = ssklId;
-			this.achsen = achsen;
-			this.hasActiveDevice = hasActiveDevice;
-			this.activeDeviceId = activeDeviceId;
-		}
-	}
-
-	private static class Booking {
-		final int buchungId;
-		final int kategorieId;
-		final int statusId; // B_ID
-
-		Booking(int buchungId, int kategorieId, int statusId) {
-			this.buchungId = buchungId;
-			this.kategorieId = kategorieId;
-			this.statusId = statusId;
-		}
-	}
-
-	private static class BookingInfos {
-		final Booking anyBooking;
-		final Booking openBooking;
-
-		BookingInfos(Booking anyBooking, Booking openBooking) {
-			this.anyBooking = anyBooking;
-			this.openBooking = openBooking;
-		}
+		throw new IllegalArgumentException("Unbekannte Regel in ACHSZAHL: " + regel);
 	}
 }

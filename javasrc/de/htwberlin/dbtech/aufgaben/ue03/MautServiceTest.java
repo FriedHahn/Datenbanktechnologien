@@ -20,6 +20,8 @@ import org.junit.FixMethodOrder;
 import org.junit.runners.MethodSorters;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.dbunit.database.DatabaseConfig;
+import org.dbunit.ext.oracle.OracleDataTypeFactory;
 
 import java.io.File;
 
@@ -44,6 +46,7 @@ public class MautServiceTest {
             IDatabaseTester dbTester = new JdbcDatabaseTester(DbCred.driverClass, DbCred.url, DbCred.user, DbCred.password,
                     DbCred.schema);
             dbTesterCon = dbTester.getConnection();
+            dbTesterCon.getConfig().setProperty(DatabaseConfig.PROPERTY_DATATYPE_FACTORY, new OracleDataTypeFactory());
             IDataSet pre = new CsvDataSet(new File("test-data/ue03-04"));
             dbTester.setDataSet(pre);
             DatabaseOperation.CLEAN_INSERT.execute(dbTesterCon, pre);
